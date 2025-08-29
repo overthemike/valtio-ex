@@ -133,6 +133,29 @@ const ReplaceObjectRefEx = () => {
   )
 }
 
+const objstate = proxy({
+  first: "Ada",
+  last: "Lovelace",
+  get userView() {
+    return {
+      fullName: `${this.first} ${this.last}`,
+      initials: `${this.first[0]}${this.last[0]}`.toUpperCase(),
+    };
+  },
+});
+
+// component
+function ComputedObject() {
+  const { userView } = useSnapshot(objstate);
+  const { fullName, initials } = userView
+  return (
+  <div>
+    <p>{fullName}</p>
+    <p>{initials}</p>
+  </div>
+  )
+}
+
 
 const App = () => {
   return (
@@ -142,6 +165,7 @@ const App = () => {
       <TodoApp />
       <UserProfile />
       <ReplaceObjectRefEx />
+      <ComputedObject />
     </div>
   )
 }

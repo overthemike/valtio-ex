@@ -329,15 +329,17 @@ const makeProxy = <T extends object>(
         return (value as Ref<unknown>).value;
       }
 
-      // --- B2) primitives: auto-deref while tracking; live primitive outside ---
+      // --- B2) primitives: AUTO-DEREF FROM ROOT WHEN TRACKING ---
       if (isPrimitive(value)) {
         if (currentTracker) {
           ensureDepSet(currentTracker.id).add(keyOf(currentPath));
-          return value;
+          // crucial line: read the LATEST value by absolute path from the root,
+          // not from the child proxy's current target
+          return getValueAtPath(rootRef, currentPath);
         }
+        // when not tracking, return a live primitive wrapper so coercion works naturally
         return createLivePrimitive<Primitive>(rootRef, currentPath);
       }
-
       // --- B4) nested objects/arrays: recurse with extended path ---
       if (value !== null && typeof value === "object") {
         return makeProxy(value as object, store, currentPath, rootRef);
@@ -346,6 +348,7 @@ const makeProxy = <T extends object>(
       // functions or other exotic values: return as-is
       return value;
     },
+
 
     set(obj, prop, newVal, receiver) {
       const ok = Reflect.set(obj, prop, newVal, receiver);
