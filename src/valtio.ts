@@ -277,38 +277,68 @@ const makeProxy = <T extends object>(
   if (cached) return cached as T;
 
   const p = new Proxy(target as object, {
-    get(obj, prop, receiver) {
+    get(obj: object, prop: string | symbol, receiver: unknown) {
+      // expose raw & a simple proxy flag
       if (prop === "__raw") return target;
       if (prop === "__isProxy") return true;
-      if (typeof prop === "symbol") return Reflect.get(obj, prop, receiver);
 
+      // pass through symbol props (e.g., Symbol.iterator, Symbol.toStringTag)
+      if (typeof prop === "symbol") {
+        return Reflect.get(obj, prop, receiver);
+      }
+
+      // derive absolute path for this property
       const key = String(prop);
       const currentPath: Path = [...base, key];
 
-      // handle getters as computed
+      // look up a property descriptor across the prototype chain
       const desc = getDescriptorDeep(obj, key);
+
+      // ===== A) computed getter =====
       if (desc && "get" in desc && typeof desc.get === "function") {
+        // create/get a computed entry bound to this absolute path
         const depKey = ensureComputed(keyOf(currentPath), () => desc.get!.call(receiver));
-        // return a live primitive that reads latest computed value
-        return createLivePrimitive<Primitive>({ [__COMPUTED_VALUE_KEY]: computedValueRoot }, [__COMPUTED_VALUE_KEY, depKey]);
+
+        if (currentTracker) {
+          // when tracking, record dep on the computed dep-key and return the raw computed value
+          ensureDepSet(currentTracker.id).add(depKey);
+          const entry = computedRegistry.get(depKey);
+          return entry ? entry.last : undefined;
+        }
+
+        // when not tracking, return a live primitive wrapper that resolves to the computed value
+        return createLivePrimitive<Primitive>(
+          { [__COMPUTED_VALUE_KEY]: computedValueRoot },
+          [__COMPUTED_VALUE_KEY, depKey]
+        );
       }
 
-      // normal property
+      // ===== B) plain data property =====
       const value = Reflect.get(obj, prop, receiver);
 
+      // --- B1) ref-wrapped values: unwrap; still record dep if tracking ---
       if (isRef(value)) {
-        return value.value; // unwrap directly
+        if (currentTracker) {
+          ensureDepSet(currentTracker.id).add(keyOf(currentPath));
+        }
+        return (value as Ref<unknown>).value;
       }
 
+      // --- B2) primitives: auto-deref while tracking; live primitive outside ---
       if (isPrimitive(value)) {
+        if (currentTracker) {
+          ensureDepSet(currentTracker.id).add(keyOf(currentPath));
+          return value;
+        }
         return createLivePrimitive<Primitive>(rootRef, currentPath);
       }
 
+      // --- B4) nested objects/arrays: recurse with extended path ---
       if (value !== null && typeof value === "object") {
         return makeProxy(value as object, store, currentPath, rootRef);
       }
 
-      // functions or other exotic values: just return as-is
+      // functions or other exotic values: return as-is
       return value;
     },
 
