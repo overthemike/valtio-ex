@@ -113,6 +113,26 @@ export function UserProfile() {
   );
 }
 
+const item = proxy({
+  prefs: {
+    theme: 'dark'
+  },
+  user: {
+    name: "Michael"
+  }
+})
+
+const ReplaceObjectRefEx = () => {
+  const { name } = useSnapshot(item.user)
+
+  return (
+    <div>
+      Hello {name}
+      <button onClick={() => item.user = { name: 'Daishi'}}>Change name</button>
+    </div>
+  )
+}
+
 
 const App = () => {
   return (
@@ -121,6 +141,7 @@ const App = () => {
       <Counter />
       <TodoApp />
       <UserProfile />
+      <ReplaceObjectRefEx />
     </div>
   )
 }
