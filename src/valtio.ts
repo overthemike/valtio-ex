@@ -32,10 +32,16 @@ function isRef(value: unknown): value is Ref<unknown> {
 // --------- tiny runtime state (module singletons) ---------
 type ComputedEntry = { run: () => unknown; last: unknown; lastRun: number };
 
+
+
+// NEW: map *any* proxy object back to its Store
+
+
 const computedRegistry = new Map<DepKey, ComputedEntry>();     // depKey -> entry
 const dependencyGraph = new Map<CompId, Set<DepKey>>();        // tracker -> deps
 const proxyCache = new WeakMap<object, unknown>();             // target -> proxy
 const storeOfRoot = new WeakMap<object, Store>();              // original root -> store
+const storeOfProxy = new WeakMap<object, Store>();
 
 let currentTracker:
   | { kind: "component"; id: symbol }
@@ -87,11 +93,10 @@ const getDescriptorDeep = (obj: object, prop: string): PropertyDescriptor | unde
 
 const isFunction = (v: unknown) => typeof v === "function";
 
-// --------- store (functional; no classes) ---------
-type Store = {
+export type Store = {
   readonly root: object;
-  readonly subscribeComponent: (id: symbol, cb: StoreListener) => () => void;
-  readonly notifyPathChange: (path: Path) => void;
+  readonly subscribeComponent: (id: symbol, cb: () => void) => () => void;
+  readonly notifyPathChange: (path: ReadonlyArray<string>) => void;
 };
 
 // Recompute computeds affected by a set of changed keys (raw paths or computed keys).
@@ -356,6 +361,7 @@ const makeProxy = <T extends object>(
   }) as T;
 
   proxyCache.set(target, p);
+  storeOfProxy.set(p as unknown as object, store);
   return p;
 };
 
@@ -403,10 +409,14 @@ export function snapshot<T>(value: T): Snapshot<T> {
 
 // Adapter surface (frameworks can build on this, e.g., React)
 export function getStoreFor(state: object): Store {
-  const root = (state as { __raw?: object }).__raw ?? state;
-  const store = storeOfRoot.get(root);
-  if (!store) throw new Error("State is not a proxy() root (store not found).");
-  return store;
+  const maybeRaw = (state as { __raw?: object }).__raw ?? state;
+  const byRoot = storeOfRoot.get(maybeRaw);
+  if (byRoot) return byRoot;
+
+  const byProxy = storeOfProxy.get(state);
+  if (byProxy) return byProxy;
+
+  throw new Error("useSnapshot() expects a value created by proxy() (root or nested).");
 }
 
 export function withComponentTracking<S>(id: symbol, fn: () => S): S {
