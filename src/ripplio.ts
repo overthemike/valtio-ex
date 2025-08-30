@@ -41,6 +41,8 @@ const dependencyGraph = new Map<CompId, Set<DepKey>>();    // tracker -> deps (c
 const proxyCache = new WeakMap<object, unknown>();         // target -> proxy
 const storeOfRoot = new WeakMap<object, Store>();          // initial object -> store
 const storeOfProxy = new WeakMap<object, Store>();         // any proxy -> store
+const proxyMeta = new WeakMap<object, { store: Store; base: Path }>();
+
 
 // reverse index for fast invalidation: RAW prefix -> set of computed keys
 const reverseRawToComp = new Map<DepKey, Set<DepKey>>();
@@ -468,18 +470,35 @@ const makeProxy = <T extends object>(
     set(obj, prop, newVal, receiver) {
       const ok = Reflect.set(obj, prop, newVal, receiver);
       store.notifyPathChange([...base, String(prop)]);
+      if (Array.isArray(obj) && prop !== "length") {
+        // mutators like push/splice add indices; also bump length
+        store.notifyPathChange([...base, "length"]);
+      }
+      return ok;
+    },
+
+    defineProperty(obj, prop, descriptor) {
+      const ok = Reflect.defineProperty(obj, prop, descriptor);
+      store.notifyPathChange([...base, String(prop)]);
+      if (Array.isArray(obj) && prop !== "length") {
+        store.notifyPathChange([...base, "length"]);
+      }
       return ok;
     },
 
     deleteProperty(obj, prop) {
       const ok = Reflect.deleteProperty(obj, prop);
       store.notifyPathChange([...base, String(prop)]);
+      if (Array.isArray(obj) && prop !== "length") {
+        store.notifyPathChange([...base, "length"]);
+      }
       return ok;
     },
   }) as T;
 
   proxyCache.set(target, p);
   storeOfProxy.set(p as unknown as object, store);
+  proxyMeta.set(p as unknown as object, { store, base }); 
   return p;
 };
 
@@ -503,17 +522,87 @@ export function proxy<T extends object>(initial: T): T {
   return makeProxy(initial, store, [], initial as unknown as object);
 }
 
-// ---- Tracker w/ deps (replace your current tracker decl) ----
 
+function snapshotPlain<T>(value: T) {
+  if (isLivePrimitiveGuard<Primitive>(value)) {
+    return (value as () => Primitive)();
+  }
+  if (value === null || typeof value !== "object") return value;
 
-// Narrowing helper
-type ComponentTracker = Extract<NonNullable<Tracker>, { kind: "component" }>;
-function isComponentTracker(t: Tracker): t is ComponentTracker {
-  return !!t && t.kind === "component";
+  // ---- Managed proxy ARRAY: read indices from root by absolute path
+  if (Array.isArray(value)) {
+    const arr = value as unknown as object;
+    const meta = proxyMeta.get(arr);
+    if (meta) {
+      const { store, base } = meta;
+      // track length
+      if (currentTracker) {
+        const deps = ensureDepSet(currentTracker.id);
+        const lenKey = keyOf([...base, "length"]);
+        deps.add(lenKey);
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const len = (store.root as any)[base[0] as any] // cheap but we’ll robustly read length via Reflect
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ? Reflect.get(getValueAtPath(store.root, base) as any, "length")
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        : Reflect.get(getValueAtPath(store.root, base) as any, "length");
+
+      const out = new Array(len as number);
+      for (let i = 0; i < (len as number); i++) {
+        const abs = [...base, String(i)];
+        if (currentTracker) {
+          const deps = ensureDepSet(currentTracker.id);
+          const rawKey = keyOf(abs);
+          deps.add(rawKey);
+        }
+        const rawVal = getValueAtPath(store.root, abs);
+        out[i] = snapshotPlain(rawVal);
+      }
+      return out;
+    }
+
+    // Non-managed array: deep copy normally
+    const src = value as unknown as Array<unknown>;
+    const out = new Array(src.length);
+    for (let i = 0; i < src.length; i++) out[i] = snapshotPlain(src[i]);
+    return out;
+  }
+
+  // ---- Managed proxy OBJECT: copy enumerable props from root by absolute path
+  const obj = value as unknown as object;
+  const meta = proxyMeta.get(obj);
+  if (meta) {
+    const { store, base } = meta;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const target = (obj as any).__raw ?? obj; // enumerate actual keys
+    const out: Record<string, unknown> = {};
+    for (const k of Reflect.ownKeys(target)) {
+      if (typeof k !== "string") continue;
+      const desc = Object.getOwnPropertyDescriptor(target, k);
+      if (!desc || !desc.enumerable) continue;
+
+      const abs = [...base, k];
+      if (currentTracker) {
+        const deps = ensureDepSet(currentTracker.id);
+        const rawKey = keyOf(abs);
+        deps.add(rawKey);
+      }
+      const rawVal = getValueAtPath(store.root, abs);
+      out[k] = snapshotPlain(rawVal);
+    }
+    return out;
+  }
+
+  // ---- Plain object (not managed): deep copy via own enumerable keys
+  const plain = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(plain)) {
+    out[k] = snapshotPlain(plain[k]);
+  }
+  return out;
 }
 
-
-// ---- Snapshot types (unchanged) ----
 export type Snapshot<T> =
   T extends LivePrimitive<infer P> ? P :
   T extends Primitive ? T :
@@ -521,33 +610,33 @@ export type Snapshot<T> =
   T extends object ? { readonly [K in keyof T]: Snapshot<T[K]> } :
   never;
 
-// ---- snapshot(): return a VIEW bound to the component id+deps ----
 export function snapshot<T>(value: T): Snapshot<T> {
-  // Live primitive wrapper -> read it now (records dep)
   if (isLivePrimitiveGuard<Primitive>(value)) {
     return value() as Snapshot<T>;
   }
-  // Non-object -> already stable
   if (value === null || typeof value !== "object") {
     return value as Snapshot<T>;
   }
 
+  // Always materialize arrays to plain data (prevents uncontrolled inputs)
+  if (Array.isArray(value)) {
+    return snapshotPlain(value) as Snapshot<T>;
+  }
+  
+
+  // Managed proxy/root -> return a VIEW (bound to component) for OBJECTS
   const asObj = value as unknown as object;
   const maybeRaw = (asObj as { __raw?: object }).__raw ?? asObj;
   const isManaged = storeOfProxy.has(asObj) || storeOfRoot.has(maybeRaw);
-
   if (isManaged) {
-    // If we’re in a component render now, bind its id+deps into the view
-    const bind = isComponentTracker(currentTracker)
-      ? { id: currentTracker.id, deps: currentTracker.deps }
-      : undefined;
+    const bind =
+      currentTracker && currentTracker.kind === "component"
+        ? { id: currentTracker.id as symbol, deps: currentTracker.deps as Set<DepKey> }
+        : undefined;
     return makeSnapshotView(asObj, bind) as Snapshot<T>;
   }
 
-  // Plain object/array not managed by us -> shallow snapshot
-  if (Array.isArray(value)) {
-    return (value as unknown as Array<unknown>).map((v) => snapshot(v)) as Snapshot<T>;
-  }
+  // Plain non-managed object: materialize shallowly
   const out: Record<string, unknown> = {};
   for (const k of Object.keys(value as Record<string, unknown>)) {
     out[k] = snapshot((value as Record<string, unknown>)[k]);
@@ -555,7 +644,7 @@ export function snapshot<T>(value: T): Snapshot<T> {
   return out as Snapshot<T>;
 }
 
-// ---- makeSnapshotView(): re-enter tracking per get using captured bind ----
+
 function makeSnapshotView<T extends object>(
   proxyObj: T,
   bind?: { id: symbol; deps: Set<DepKey> }
@@ -566,42 +655,46 @@ function makeSnapshotView<T extends object>(
         return Reflect.get(proxyObj as object, prop);
       }
 
-      // Wrap each property read under the *same* component tracker if bound.
+      // Run the read under the same component tracker if bound.
       const readUnder = <R>(thunk: () => R): R => {
-        if (bind) {
-          const prev = currentTracker;
-          currentTracker = { kind: "component", id: bind.id, deps: bind.deps };
-          try {
-            return thunk();
-          } finally {
-            currentTracker = prev;
-          }
+        if (!bind) return thunk();
+        const prev = currentTracker;
+        currentTracker = { kind: "component", id: bind.id, deps: bind.deps };
+        try {
+          return thunk();
+        } finally {
+          currentTracker = prev;
         }
-        return thunk();
       };
 
       const val = readUnder(() => Reflect.get(proxyObj as object, prop));
 
-      // Safety: if we somehow got a live-primitive fn, deref it now
+      // SAFETY: if a live-primitive fn leaked, force-deref it
       if (isLivePrimitiveGuard<Primitive>(val)) {
         return (val as () => Primitive)();
+
+
       }
 
-      // For managed nested objects, return another bound view (same bind)
+      // For arrays returned from an object property, immediately deep materialize
+      // to a plain array so React sees a normal array (map/iterator safe).
+      if (Array.isArray(val)) {
+        return snapshotPlain(val);
+      }
+
+      // For managed nested objects, return another bound view so nested reads track too
       if (val !== null && typeof val === "object") {
         const asObj = val as object;
         const maybeRaw = (asObj as { __raw?: object }).__raw ?? asObj;
-        const isManaged = storeOfProxy.has(asObj) || storeOfRoot.has(maybeRaw);
-        if (isManaged) {
+        if (storeOfProxy.has(asObj) || storeOfRoot.has(maybeRaw)) {
           return makeSnapshotView(asObj, bind);
         }
       }
+
       return val;
     },
 
     ownKeys() {
-      // Branch shape deps will be recorded via individual property gets;
-      // nothing extra required here for our model.
       return Reflect.ownKeys(proxyObj as object);
     },
 
@@ -621,6 +714,8 @@ function makeSnapshotView<T extends object>(
 
 
 
+
+
 export function getStoreFor(state: object): Store {
   const maybeRaw = (state as { __raw?: object }).__raw ?? state;
   const byRoot = storeOfRoot.get(maybeRaw);
@@ -634,11 +729,12 @@ export function getStoreFor(state: object): Store {
 
 export function withComponentTracking<S>(id: symbol, fn: () => S): S {
   const deps = new Set<DepKey>();
-  dependencyGraph.set(id, deps);           // keep the authoritative set in the graph
+  dependencyGraph.set(id, deps);
+  const prev = currentTracker;
   currentTracker = { kind: "component", id, deps };
   try {
     return fn();
   } finally {
-    currentTracker = null;
+    currentTracker = prev;
   }
 }

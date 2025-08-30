@@ -5,7 +5,7 @@ import {
   withComponentTracking,
   type StoreListener,
   type Snapshot as CoreSnapshot,
-} from "./ripplio"; // your core file
+} from "./ripplio";
 
 // Overloads for good typings:
 export function useSnapshot<T extends object>(state: T): CoreSnapshot<T>;
@@ -16,44 +16,49 @@ export function useSnapshot<T extends object, S = CoreSnapshot<T>>(
 ): S {
   const store = getStoreFor(state);
 
-  // one id per component instance
-  const idRef = useRef<symbol>(null);
+  // Stable component id
+  const idRef = useRef<symbol | null>(null);
   if (!idRef.current) idRef.current = Symbol("component");
+  const cid = idRef.current;
 
+  // Cache for the selected snapshot
   type CacheBox = { value: S | undefined; ready: boolean };
   const cacheRef = useRef<CacheBox>({ value: undefined, ready: false });
 
-  // IMPORTANT: track WHILE snapshotting
-  const computeSelected = (): S =>
-    withComponentTracking(idRef.current!, () => {
+  // Stable ref to the compute function (so effects don't need it as a dep)
+  const computeSelectedRef = useRef<() => S>(() => undefined as unknown as S);
+  computeSelectedRef.current = () =>
+    withComponentTracking(cid, () => {
       const selected = selector ? selector(state) : (state as unknown as S);
       return snapshot(selected) as S;
     });
 
   const subscribe = (onStoreChange: StoreListener) =>
-    store.subscribeComponent(idRef.current!, () => {
-      cacheRef.current.value = computeSelected();
+    store.subscribeComponent(cid, () => {
+      // precompute so getSnapshot returns fresh value immediately
+      cacheRef.current.value = computeSelectedRef.current();
       cacheRef.current.ready = true;
       onStoreChange();
     });
 
-  const getSnapshot = () => {
-    if (!cacheRef.current.ready) {
-      cacheRef.current.value = computeSelected();
-      cacheRef.current.ready = true;
-    }
-    return cacheRef.current.value as S;
-  };
+ const getSnapshot = () => {
+  if (!cacheRef.current.ready) {
+    cacheRef.current.value = computeSelectedRef.current(); // runs under withComponentTracking
+    cacheRef.current.ready = true;
+  }
+  return cacheRef.current.value as S;
+};
 
-  const getServerSnapshot = getSnapshot;
+const getServerSnapshot = getSnapshot
 
-  // ensure we have an initial cached value before paint
-  useLayoutEffect(() => {
-    if (!cacheRef.current.ready) {
-      cacheRef.current.value = computeSelected();
-      cacheRef.current.ready = true;
-    }
-  }, []);
+// prime before paint (no deps to silence ESLint)
+useLayoutEffect(() => {
+  if (!cacheRef.current.ready) {
+    cacheRef.current.value = computeSelectedRef.current();
+    cacheRef.current.ready = true;
+  }
+   
+}, []);
 
   return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 }
