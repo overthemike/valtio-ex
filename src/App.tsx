@@ -1,36 +1,38 @@
-import { useSnapshot } from "./valtio-hook";
-import { proxy } from './valtio';
+import { useSnapshot } from "./react";
+import { proxy } from './ripplio';
+import FineGrainedDemo from "./FineGrainedDemo";
 
-const state = proxy({
-  items: [{ price: 10 }, { price: 20 }],
-  taxRate: 0.1,
+// const cartstate = proxy({
+//   items: [{ price: 10 }, { price: 20 }],
+//   taxRate: 0.1,
 
-  get subtotal() {
-    return this.items.reduce((sum: number, item: { price: number }) => sum + item.price, 0);
-  },
+//   get subtotal() {
+//     return this.items.reduce((sum: number, item: { price: number }) => sum + item.price, 0);
+//   },
 
-  get tax() {
-    return this.subtotal * this.taxRate; // depends on computed
-  },
+//   get tax() {
+//     return this.subtotal * this.taxRate; // depends on computed
+//   },
 
-  get total() {
-    return this.subtotal + this.tax; // nested computed
-  },
-});
+//   get total() {
+//     return this.subtotal + this.tax; // nested computed
+//   },
+// });
 
-export function Cart() {
-  const snap = useSnapshot(state);
-  return (
-    <div>
-      <div>Subtotal: {snap.subtotal}</div>
-      <div>Tax: {snap.tax.toFixed(2)}</div>
-      <div>Total: {snap.total}</div>
-      <button onClick={() => { state.items[0].price = state.items[0].price + 1; }}>
-        +$1 first item
-      </button>
-    </div>
-  );
-}
+// export function Cart() {
+//   const snap = useSnapshot(cartstate);
+  
+//   return (
+//     <div>
+//       <div>Subtotal: {snap.subtotal}</div>
+//       <div>Tax: {snap.tax}</div>
+//       <div>Total: {snap.total}</div>
+//       <button onClick={() => { cartstate.items[0].price = cartstate.items[0].price + 1; }}>
+//         +$1 first item
+//       </button>
+//     </div>
+//   );
+// }
 
 const counter = proxy({
   count: 0,
@@ -72,7 +74,7 @@ export function TodoApp() {
         Add Task
       </button>
       <ul>
-        {snap.list.map((t, i) => (
+        {snap.list.map((t: { text: string; done: boolean }, i: number) => (
           <li key={i}>
             <label>
               <input
@@ -160,12 +162,12 @@ function ComputedObject() {
 const App = () => {
   return (
     <div>
-      <Cart />
       <Counter />
       <TodoApp />
       <UserProfile />
       <ReplaceObjectRefEx />
       <ComputedObject />
+      <FineGrainedDemo />
     </div>
   )
 }

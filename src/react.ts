@@ -5,7 +5,7 @@ import {
   withComponentTracking,
   type StoreListener,
   type Snapshot as CoreSnapshot,
-} from "./valtio"; // your core file
+} from "./ripplio"; // your core file
 
 // Overloads for good typings:
 export function useSnapshot<T extends object>(state: T): CoreSnapshot<T>;
